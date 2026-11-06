@@ -1,0 +1,2 @@
+[console_scripts]
+review-rdk-logger = review_rdk_logger.cli:main

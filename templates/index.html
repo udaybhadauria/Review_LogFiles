@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RDK Log Review</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <div>
+          <h1>RDK Log Review</h1>
+          <p>Upload .tgz log bundles and inspect the most relevant logs side-by-side.</p>
+        </div>
+      </header>
+
+      <section class="upload-panel">
+        <form action="/upload" method="post" enctype="multipart/form-data">
+          <label class="upload-label" for="archives">Upload log tarballs (.tgz)</label>
+          <input id="archives" name="archives" type="file" multiple accept=".tgz,.tar.gz" />
+          <button type="submit">Load logs</button>
+        </form>
+      </section>
+
+      <section class="controls">
+        <div class="field-group">
+          <label for="macSelect">Select MAC</label>
+          <select id="macSelect"></select>
+        </div>
+      </section>
+
+      <section class="log-picker-panel">
+        <div class="picker-header">
+          <h2>Available log files</h2>
+          <span id="selectionHint">Choose up to 3 logs</span>
+        </div>
+        <div id="logList" class="log-list"></div>
+      </section>
+
+      <section class="viewer-panel">
+        <div id="viewerGrid" class="viewer-grid"></div>
+      </section>
+    </div>
+
+    <script>
+      const initialCatalog = {{ catalog | tojson }};
+      const MAX_LOGS = 3;
+      const state = {
+        selectedMac: '',
+        selectedFiles: []
+      };
+
+      function getFilesForMac(mac) {
+        const entries = initialCatalog.by_mac?.[mac] || [];
+        const files = [];
+        entries.forEach((entry) => {
+          entry.log_files.forEach((path) => {
+            files.push({
+              archive: entry.archive,
+              path,
+              label: `${entry.archive} :: ${path}`
+            });
+          });
+        });
+        return files;
+      }
+
+      function renderMacs() {
+        const macSelect = document.getElementById('macSelect');
+        macSelect.innerHTML = '';
+
+        const macs = initialCatalog.macs || [];
+        if (!macs.length) {
+          const option = document.createElement('option');
+          option.textContent = 'No tarballs found';
+          macSelect.appendChild(option);
+          return;
+        }
+
+        macs.forEach((mac) => {
+          const option = document.createElement('option');
+          option.value = mac;
+          option.textContent = mac;
+          macSelect.appendChild(option);
+        });
+
+        if (!state.selectedMac && macs.length) {
+          state.selectedMac = macs[0];
+        }
+        macSelect.value = state.selectedMac;
+      }
+
+      function renderFileList() {
+        const mac = state.selectedMac;
+        const fileList = document.getElementById('logList');
+        fileList.innerHTML = '';
+
+        const files = getFilesForMac(mac);
+        if (!files.length) {
+          fileList.innerHTML = '<p class="empty-state">No log files were found for this MAC.</p>';
+          return;
+        }
+
+        files.forEach((file) => {
+          const wrapper = document.createElement('label');
+          wrapper.className = 'log-option';
+
+          const input = document.createElement('input');
+          input.type = 'checkbox';
+          input.value = `${file.archive}::${file.path}`;
+          input.checked = state.selectedFiles.includes(input.value);
+          input.addEventListener('change', () => {
+            const key = input.value;
+            if (input.checked) {
+              if (state.selectedFiles.length >= MAX_LOGS) {
+                input.checked = false;
+                return;
+              }
+              state.selectedFiles.push(key);
+            } else {
+              state.selectedFiles = state.selectedFiles.filter((item) => item !== key);
+            }
+            renderFileList();
+            renderViewer();
+          });
+
+          if (state.selectedFiles.length >= MAX_LOGS && !input.checked) {
+            input.disabled = true;
+          }
+
+          const labelText = document.createElement('span');
+          labelText.textContent = file.label;
+
+          wrapper.appendChild(input);
+          wrapper.appendChild(labelText);
+          fileList.appendChild(wrapper);
+        });
+      }
+
+      async function renderViewer() {
+        const viewerGrid = document.getElementById('viewerGrid');
+        viewerGrid.innerHTML = '';
+
+        const keys = state.selectedFiles.slice(0, MAX_LOGS);
+        if (!keys.length) {
+          viewerGrid.innerHTML = '<div class="empty-state">Select up to 3 logs to view them here.</div>';
+          return;
+        }
+
+        for (const key of keys) {
+          const [archive, path] = key.split('::');
+          const item = document.createElement('div');
+          item.className = 'log-pane';
+          item.innerHTML = '<div class="pane-header"><strong>' + path + '</strong></div><pre class="log-content">Loading...</pre>';
+          viewerGrid.appendChild(item);
+
+          try {
+            const response = await fetch(`/api/log-content?archive=${encodeURIComponent(archive)}&path=${encodeURIComponent(path)}`);
+            const data = await response.json();
+            const contentNode = item.querySelector('.log-content');
+            contentNode.textContent = data.content || 'No content available for this log file.';
+          } catch (error) {
+            const contentNode = item.querySelector('.log-content');
+            contentNode.textContent = 'Unable to load log content.';
+          }
+        }
+      }
+
+      document.getElementById('macSelect').addEventListener('change', (event) => {
+        state.selectedMac = event.target.value;
+        state.selectedFiles = [];
+        renderFileList();
+        renderViewer();
+      });
+
+      renderMacs();
+      if (initialCatalog.macs && initialCatalog.macs.length) {
+        state.selectedMac = initialCatalog.macs[0];
+        renderFileList();
+        renderViewer();
+      }
+    </script>
+  </body>
+</html>

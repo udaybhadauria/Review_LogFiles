@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "review-rdk-logger"
+version = "0.1.0"
+description = "Review and summarize RDK log tarballs (.tgz) by extracting them and scanning log content for issues."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Copilot" }]
+
+[project.scripts]
+review-rdk-logger = "review_rdk_logger.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

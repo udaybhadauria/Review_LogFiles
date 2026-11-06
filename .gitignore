@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+output/
+reports/
+uploads/
+*.log
+*.tgz
+*.tar.gz
+*.pem
+.env
+.env.*

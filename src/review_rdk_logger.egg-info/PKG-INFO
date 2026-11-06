@@ -1,0 +1,34 @@
+Metadata-Version: 2.4
+Name: review-rdk-logger
+Version: 0.1.0
+Summary: Review and summarize RDK log tarballs (.tgz) by extracting them and scanning log content for issues.
+Author: Copilot
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+
+# Review RDK Logger
+
+This project is designed to review RDK log bundles stored as `.tgz` archives.
+
+## Purpose
+
+- Untar each log archive
+- Scan extracted log files for likely issues
+- Highlight common error keywords such as `ERROR`, `PANIC`, `FAIL`, and `EXCEPTION`
+- Produce a compact JSON report for each archive
+
+## Quick start
+
+```bash
+python -m review_rdk_logger --directory .
+```
+
+Or review a single archive:
+
+```bash
+python -m review_rdk_logger "00CB7AC3E122_Logs_11-01-26-04-37PM.tgz"
+```
+
+## Output
+
+The tool writes a JSON summary to stdout. It also supports writing to a file with `--output report.json`.
