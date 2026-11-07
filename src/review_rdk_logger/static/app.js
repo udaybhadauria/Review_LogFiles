@@ -217,11 +217,8 @@
           }),
           el('span', { text: entry.archive })
         ),
-        el('div', { class: 'archive-main' },
-          el('span', { class: 'archive-time', text: fmtDate(entry.captured_at) || entry.archive }),
-          el('span', { class: 'archive-meta muted', text: `${entry.log_files.length} files · ${fmtBytes(entry.size)}${entry.deletable ? ' · uploaded' : ''}` })),
         el('div', { class: 'archive-side' },
-          scanning ? el('span', { class: 'spinner', title: 'Scanning…' }) : badges(archiveTotals(entry.archive)),
+          scanning ? el('span', { class: 'spinner', title: 'Scanning…' }) : null,
           entry.deletable
             ? el('button', {
                 type: 'button', class: 'btn btn-icon btn-sm btn-danger', title: 'Delete uploaded bundle',
