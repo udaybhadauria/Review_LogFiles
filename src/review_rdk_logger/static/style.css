@@ -159,6 +159,7 @@ select.input { width: auto; cursor: pointer; }
   display: flex; flex-direction: column; gap: 12px;
   padding: 14px; overflow: hidden;
   border-right: 1px solid var(--border);
+  height: 100%;
 }
 
 .panel {
@@ -168,10 +169,10 @@ select.input { width: auto; cursor: pointer; }
 }
 .panel:not(.panel-grow) {
   flex: 0 0 auto;
-  max-height: 200px;
+  height: 180px;
   overflow: hidden;
 }
-.panel-grow { flex: 1; min-height: 0; overflow: hidden; }
+.panel-grow { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .panel-head h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
 
@@ -206,7 +207,7 @@ select.input { width: auto; cursor: pointer; }
 .file-tools { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; flex-shrink: 0; }
 .file-toggles { display: flex; align-items: center; gap: 12px; }
 .file-toggles select { margin-left: auto; }
-.file-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; margin: 0 -4px; padding: 0 4px; min-height: 0; }
+.file-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; margin: 0 -4px; padding: 0 4px; min-height: 100px; }
 .file { padding: 6px 8px; }
 .file.active { background: var(--accent-soft); }
 .file.active .file-name { color: var(--accent); }
