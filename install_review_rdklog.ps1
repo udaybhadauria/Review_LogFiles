@@ -80,7 +80,8 @@ if (Test-Path (Join-Path $Dir '.git')) {
   if ((Test-Path $Dir) -and (Get-ChildItem -Force -LiteralPath $Dir | Select-Object -First 1)) {
     Fail "$Dir exists, is not empty and is not a git checkout. Use -Dir to choose another location."
   }
-  Invoke-Checked git @('clone', '-q', '--depth', '1', '--branch', $Branch, $Repo, $Dir)
+  $depth = if (Test-Path -LiteralPath $Repo) { @() } else { @('--depth', '1') }
+  Invoke-Checked git (@('clone', '-q') + $depth + @('--branch', $Branch, $Repo, $Dir))
 }
 if (-not (Test-Path (Join-Path $Dir 'src\review_rdk_logger'))) { Fail "$Dir does not look like the Review LogFiles project." }
 Ok "Code at $(git -C $Dir rev-parse --short HEAD)"
