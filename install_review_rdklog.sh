@@ -26,6 +26,8 @@ DIR_FROM_USER=0
 PORT_FROM_USER=0
 HOST_FROM_USER=0
 APP_SCHEME="https"
+PKG_FAILED=0
+PKG_LOG="$(mktemp "${TMPDIR:-/tmp}/review-rdklog-pkgs.XXXXXX")"
 
 if [[ -t 1 ]]; then
   C_BLUE=$'\033[1;34m' C_YELLOW=$'\033[1;33m' C_RED=$'\033[1;31m' C_GREEN=$'\033[1;32m' C_RESET=$'\033[0m'
@@ -127,8 +129,13 @@ service_exists() { [[ $HAS_SYSTEMD -eq 1 && -f "$UNIT_PATH" ]]; }
 
 # ---------------------------------------------------------------------------
 
-install_packages() {
-  [[ $SKIP_PACKAGES -eq 1 ]] && { info "Skipping OS packages (--skip-packages)"; return; }
+prereqs_ok() {
+  command -v git >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 \
+    && python3 -c 'import sys, venv, ensurepip; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
+}
+
+# Runs with errexit disabled (called via ||), so every step is chained explicitly.
+os_install() {
   if command -v apt-get >/dev/null 2>&1; then
     if command -v fuser >/dev/null 2>&1; then
       while $SUDO fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
@@ -136,9 +143,9 @@ install_packages() {
         sleep 3
       done
     fi
-    $SUDO apt-get update -qq
-    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-      git curl ca-certificates python3 python3-venv python3-pip >/dev/null
+    $SUDO apt-get update -qq >>"$PKG_LOG" 2>&1
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      git curl ca-certificates python3 python3-venv python3-pip >>"$PKG_LOG" 2>&1
   elif command -v dnf >/dev/null 2>&1; then
     $SUDO dnf install -y -q git curl ca-certificates python3 python3-pip
   elif command -v yum >/dev/null 2>&1; then
@@ -152,7 +159,23 @@ install_packages() {
   elif command -v brew >/dev/null 2>&1; then
     brew install git python3
   else
-    warn "No supported package manager found; assuming git, curl and python3 are installed."
+    warn "No supported package manager found."
+    return 1
+  fi
+}
+
+install_packages() {
+  if [[ $SKIP_PACKAGES -eq 1 ]]; then
+    info "Skipping OS packages (--skip-packages)"
+  elif prereqs_ok; then
+    ok "git, curl and Python (with venv) already installed"
+  else
+    info "Installing git, curl, python3 and venv support"
+    if ! os_install; then
+      PKG_FAILED=1
+      tail -n 5 "$PKG_LOG" | sed 's/^/      /' >&2
+      warn "OS package installation failed (full log: $PKG_LOG); continuing with what is already installed."
+    fi
   fi
   for cmd in git curl; do command -v "$cmd" >/dev/null 2>&1 || die "'$cmd' is required but not installed."; done
 }
@@ -197,12 +220,35 @@ sync_repo() {
     fi
     info "Cloning $REPO_URL ($BRANCH) into $PROJECT_DIR"
     mkdir -p "$(dirname "$PROJECT_DIR")"
-    git clone -q --depth 1 --branch "$BRANCH" "$REPO_URL" "$PROJECT_DIR" \
+    local depth=(--depth 1)
+    [[ -d "$REPO_URL" ]] && depth=()
+    git clone -q ${depth[@]+"${depth[@]}"} --branch "$BRANCH" "$REPO_URL" "$PROJECT_DIR" \
       || die "git clone failed. Check the URL/branch and your network or credentials."
   fi
   [[ -f "$PROJECT_DIR/pyproject.toml" && -d "$PROJECT_DIR/src/review_rdk_logger" ]] \
     || die "$PROJECT_DIR does not look like the Review LogFiles project (pyproject.toml/src missing)."
   ok "Code at $(git -C "$PROJECT_DIR" rev-parse --short HEAD) ($(git -C "$PROJECT_DIR" log -1 --format=%s | cut -c1-60))"
+}
+
+# venv -> distro venv package -> venv without pip + get-pip.py, so locked-down hosts still work.
+create_venv() {
+  local venv="$1" ver
+  "$PYTHON" -m venv "$venv" >/dev/null 2>&1 && return 0
+  rm -rf -- "$venv"
+  ver="$("$PYTHON" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+  if command -v apt-get >/dev/null 2>&1 && [[ $SKIP_PACKAGES -eq 0 && $PKG_FAILED -eq 0 ]]; then
+    info "Installing python${ver}-venv"
+    if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "python${ver}-venv" >/dev/null 2>&1 \
+      && "$PYTHON" -m venv "$venv" >/dev/null 2>&1; then
+      return 0
+    fi
+    rm -rf -- "$venv"
+  fi
+  warn "The venv/ensurepip module is unavailable; bootstrapping pip with get-pip.py"
+  "$PYTHON" -m venv --without-pip "$venv" \
+    || die "Could not create a virtualenv. Install python${ver}-venv (e.g. sudo apt-get install python${ver}-venv)."
+  curl -fsSL --max-time 60 "${GET_PIP_URL:-https://bootstrap.pypa.io/get-pip.py}" | "$venv/bin/python" - -q \
+    || { rm -rf -- "$venv"; die "Could not bootstrap pip. Install python${ver}-venv, or check network access to bootstrap.pypa.io / PyPI."; }
 }
 
 setup_venv() {
@@ -213,22 +259,14 @@ setup_venv() {
   fi
   if [[ ! -x "$venv/bin/python" ]]; then
     info "Creating virtualenv"
-    if ! "$PYTHON" -m venv "$venv" 2>/dev/null; then
-      rm -rf -- "$venv"
-      local ver
-      ver="$("$PYTHON" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
-      if command -v apt-get >/dev/null 2>&1 && [[ $SKIP_PACKAGES -eq 0 ]]; then
-        info "Installing python${ver}-venv"
-        $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "python${ver}-venv" >/dev/null
-        "$PYTHON" -m venv "$venv"
-      else
-        die "Could not create a virtualenv. Install the venv module for Python $ver."
-      fi
-    fi
+    create_venv "$venv"
   fi
   info "Installing Python dependencies"
-  "$venv/bin/python" -m pip install -q --disable-pip-version-check --upgrade pip setuptools wheel
-  "$venv/bin/python" -m pip install -q --disable-pip-version-check -e "$PROJECT_DIR"
+  local pip_hint="Check network access to PyPI (set HTTPS_PROXY, or PIP_INDEX_URL for an internal mirror) and re-run."
+  "$venv/bin/python" -m pip install -q --disable-pip-version-check --upgrade pip setuptools wheel \
+    || die "Could not upgrade pip. $pip_hint"
+  "$venv/bin/python" -m pip install -q --disable-pip-version-check -e "$PROJECT_DIR" \
+    || die "Could not install Python dependencies. $pip_hint"
   "$venv/bin/review-rdk-web" --version >/dev/null || die "Package installed but 'review-rdk-web' does not run."
   ok "Installed $("$venv/bin/review-rdk-web" --version) into $venv"
 }
