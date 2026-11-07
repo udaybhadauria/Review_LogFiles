@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const MAX_PANES = 4;
+  const MAX_PANES = 3;
   const EMPTY_BYTES = 16;
   const ERR_RE = /\b(ERROR|PANIC|FATAL|CRITICAL|SEGFAULT|EXCEPTION|TRACEBACK|FAIL|FAILED)\b/i;
   const WARN_RE = /\b(WARN|WARNING)\b/i;
@@ -175,24 +175,19 @@
   }
 
   function renderDevices() {
-    const list = $('#deviceList');
-    list.replaceChildren();
+    const select = $('#deviceSelect');
+    select.replaceChildren();
     $('#deviceCount').textContent = state.catalog.macs.length || '';
     if (!state.catalog.macs.length) {
-      list.append(
-        el('label', { class: 'empty-drop', for: 'fileInput' },
-          el('strong', { text: 'No bundles found' }),
-          el('span', { class: 'muted', text: 'Click or drop .tgz files here' }))
-      );
+      select.append(el('option', { value: '', text: 'No bundles found' }));
       return;
     }
+    select.append(el('option', { value: '', text: 'Select a device…' }));
     for (const mac of state.catalog.macs) {
       const entries = archivesForMac(mac);
       const latest = entries[0]?.captured_at || entries[0]?.modified;
-      list.append(
-        el('button', { type: 'button', class: `device${mac === state.mac ? ' active' : ''}`, onclick: () => selectMac(mac) },
-          el('span', { class: 'device-mac mono', text: mac }),
-          el('span', { class: 'device-meta muted', text: `${entries.length} bundle(s) · latest ${fmtDate(latest)}` }))
+      select.append(
+        el('option', { value: mac, selected: mac === state.mac, text: `${mac} (${entries.length} bundle(s))` })
       );
     }
   }
@@ -210,10 +205,16 @@
       const scanning = state.pending.has(entry.archive);
       const item = el('div', {
         class: `archive${entry.archive === state.archive ? ' active' : ''}`,
-        role: 'button', tabindex: '0', title: entry.archive,
-        onclick: () => selectArchive(entry.archive),
-        onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectArchive(entry.archive); } },
+        title: entry.archive,
       },
+        el('label', { class: 'toggle' },
+          el('input', {
+            type: 'checkbox',
+            checked: entry.archive === state.archive,
+            onchange: (e) => { if (e.target.checked) selectArchive(entry.archive); }
+          }),
+          el('span', { text: entry.archive })
+        ),
         el('div', { class: 'archive-main' },
           el('span', { class: 'archive-time', text: fmtDate(entry.captured_at) || entry.archive }),
           el('span', { class: 'archive-meta muted', text: `${entry.log_files.length} files · ${fmtBytes(entry.size)}${entry.deletable ? ' · uploaded' : ''}` })),
@@ -553,6 +554,7 @@
 
   // ---------- wiring ----------
   function wire() {
+    $('#deviceSelect').addEventListener('change', (e) => { selectMac(e.target.value || null); });
     $('#fileInput').addEventListener('change', (e) => { uploadFiles(e.target.files); e.target.value = ''; });
     $('#refreshBtn').addEventListener('click', () => { state.summaries.clear(); loadCatalog(); });
     $('#themeBtn').addEventListener('click', () => {

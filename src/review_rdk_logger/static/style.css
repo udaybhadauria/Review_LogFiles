@@ -157,7 +157,7 @@ select.input { width: auto; cursor: pointer; }
 .sidebar {
   width: var(--sidebar-w); flex: none;
   display: flex; flex-direction: column; gap: 12px;
-  padding: 14px; overflow: hidden;
+  padding: 14px; overflow-y: auto;
   border-right: 1px solid var(--border);
   height: 100%;
 }
@@ -169,7 +169,7 @@ select.input { width: auto; cursor: pointer; }
 }
 .panel:not(.panel-grow) {
   flex: 0 0 auto;
-  height: 180px;
+  max-height: 200px;
   overflow: hidden;
 }
 .panel-grow { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
@@ -177,6 +177,7 @@ select.input { width: auto; cursor: pointer; }
 .panel-head h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
 
 .device-list, .archive-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; flex: 1; min-height: 0; }
+#deviceSelect { margin-bottom: 0; }
 
 .device, .archive, .file {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
