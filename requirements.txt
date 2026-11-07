@@ -1,2 +1,4 @@
-Flask>=3.0.0
-cryptography>=42.0.0
+# Runtime dependencies (mirrors pyproject.toml). Prefer: pip install -e .
+Flask>=3.0,<4
+cryptography>=41
+gunicorn>=22; sys_platform != 'win32'

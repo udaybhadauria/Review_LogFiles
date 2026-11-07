@@ -25,6 +25,7 @@ ASSUME_YES=0
 DIR_FROM_USER=0
 PORT_FROM_USER=0
 HOST_FROM_USER=0
+APP_SCHEME="https"
 
 if [[ -t 1 ]]; then
   C_BLUE=$'\033[1;34m' C_YELLOW=$'\033[1;33m' C_RED=$'\033[1;31m' C_GREEN=$'\033[1;32m' C_RESET=$'\033[0m'
@@ -56,6 +57,7 @@ Options:
   --open-firewall    Open the port in ufw/firewalld if active
   --skip-packages    Do not install OS packages (git/python3/...)
   --allow-root       Allow running as root (service will run as root)
+  --status           Show version, service state and health of an installation
   --uninstall        Stop/remove the service and optionally the install dir
   -y, --yes          Do not prompt for confirmation
   -h, --help         Show this help
@@ -80,6 +82,7 @@ while [[ $# -gt 0 ]]; do
     --skip-packages) SKIP_PACKAGES=1; shift ;;
     --allow-root)   ALLOW_ROOT=1; shift ;;
     --uninstall)    ACTION="uninstall"; shift ;;
+    --status)       ACTION="status"; shift ;;
     -y|--yes)       ASSUME_YES=1; shift ;;
     -h|--help)      usage; exit 0 ;;
     *)              usage >&2; die "Unknown option: $1" ;;
@@ -197,8 +200,8 @@ sync_repo() {
     git clone -q --depth 1 --branch "$BRANCH" "$REPO_URL" "$PROJECT_DIR" \
       || die "git clone failed. Check the URL/branch and your network or credentials."
   fi
-  [[ -f "$PROJECT_DIR/app.py" && -f "$PROJECT_DIR/requirements.txt" ]] \
-    || die "$PROJECT_DIR does not look like the Review LogFiles project (app.py/requirements.txt missing)."
+  [[ -f "$PROJECT_DIR/pyproject.toml" && -d "$PROJECT_DIR/src/review_rdk_logger" ]] \
+    || die "$PROJECT_DIR does not look like the Review LogFiles project (pyproject.toml/src missing)."
   ok "Code at $(git -C "$PROJECT_DIR" rev-parse --short HEAD) ($(git -C "$PROJECT_DIR" log -1 --format=%s | cut -c1-60))"
 }
 
@@ -225,9 +228,9 @@ setup_venv() {
   fi
   info "Installing Python dependencies"
   "$venv/bin/python" -m pip install -q --disable-pip-version-check --upgrade pip setuptools wheel
-  "$venv/bin/python" -m pip install -q --disable-pip-version-check -r "$PROJECT_DIR/requirements.txt"
   "$venv/bin/python" -m pip install -q --disable-pip-version-check -e "$PROJECT_DIR"
-  ok "Virtualenv ready ($venv)"
+  "$venv/bin/review-rdk-web" --version >/dev/null || die "Package installed but 'review-rdk-web' does not run."
+  ok "Installed $("$venv/bin/review-rdk-web" --version) into $venv"
 }
 
 set_env_var() {
@@ -256,11 +259,19 @@ setup_env() {
   if ! grep -Eq '^FLASK_SECRET_KEY=.{32,}' "$env_file" || grep -q '^FLASK_SECRET_KEY=change-me' "$env_file"; then
     set_env_var "$env_file" FLASK_SECRET_KEY "$("$PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
   fi
-  # The effective port is whatever .env says (it may have been customised earlier).
-  APP_PORT="$(sed -n 's/^APP_PORT=//p' "$env_file" | tail -n1)"
-  APP_PORT="${APP_PORT:-5001}"
+  read_env_settings
   mkdir -p "$PROJECT_DIR/uploads"
-  ok "Configuration in $env_file (port $APP_PORT)"
+  ok "Configuration in $env_file ($APP_SCHEME, port $APP_PORT)"
+}
+
+# The effective settings are whatever .env says (it may have been customised by hand).
+env_value() { sed -n "s/^$1=//p" "$PROJECT_DIR/.env" 2>/dev/null | tail -n1 | tr -d "\"'\r"; }
+read_env_settings() {
+  APP_PORT="$(env_value APP_PORT)"; APP_PORT="${APP_PORT:-5001}"
+  case "$(env_value APP_SSL | tr '[:upper:]' '[:lower:]')" in
+    0|false|no|off) APP_SCHEME="http" ;;
+    *)              APP_SCHEME="https" ;;
+  esac
 }
 
 port_in_use() {
@@ -289,12 +300,16 @@ Type=simple
 User=${run_user}
 Group=${run_group}
 WorkingDirectory=${PROJECT_DIR}
+Environment=REVIEW_DATA_DIR=${PROJECT_DIR}
+Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=${PROJECT_DIR}/.env
-ExecStart=${PROJECT_DIR}/.venv/bin/python ${PROJECT_DIR}/app.py
+ExecStart=${PROJECT_DIR}/.venv/bin/review-rdk-web
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=20
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=full
 
 [Install]
 WantedBy=multi-user.target
@@ -321,11 +336,11 @@ open_firewall() {
 }
 
 health_check() {
-  info "Waiting for https://127.0.0.1:${APP_PORT}/healthz"
-  local _
+  local url="${APP_SCHEME}://127.0.0.1:${APP_PORT}/healthz" _ body
+  info "Waiting for $url"
   for _ in $(seq 1 20); do
-    if curl -fsk --max-time 2 "https://127.0.0.1:${APP_PORT}/healthz" >/dev/null 2>&1; then
-      ok "App is responding"
+    if body="$(curl -fsk --max-time 2 "$url" 2>/dev/null)"; then
+      ok "App is responding: $body"
       return 0
     fi
     sleep 1
@@ -339,6 +354,21 @@ primary_ip() {
   command -v hostname >/dev/null 2>&1 && ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
   [[ -z "$ip" ]] && command -v ip >/dev/null 2>&1 && ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')"
   echo "${ip:-127.0.0.1}"
+}
+
+do_status() {
+  [[ -d "$PROJECT_DIR/.git" ]] || die "No installation found at $PROJECT_DIR (use --dir)."
+  [[ -f "$PROJECT_DIR/.env" ]] && read_env_settings
+  info "Directory: $PROJECT_DIR"
+  info "Revision : $(git -C "$PROJECT_DIR" rev-parse --short HEAD) ($(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD))"
+  [[ -x "$PROJECT_DIR/.venv/bin/review-rdk-web" ]] && info "Version  : $("$PROJECT_DIR/.venv/bin/review-rdk-web" --version)"
+  if service_exists; then
+    info "Service  : $SERVICE_NAME is $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
+  else
+    info "Service  : not installed"
+  fi
+  health_check || true
+  info "URL      : ${APP_SCHEME}://$(primary_ip):${APP_PORT}"
 }
 
 do_uninstall() {
@@ -388,24 +418,31 @@ do_install() {
     open_firewall
   fi
 
-  local url="https://$(primary_ip):${APP_PORT}"
+  local url="${APP_SCHEME}://$(primary_ip):${APP_PORT}" note=""
+  [[ "$APP_SCHEME" == "https" ]] && note="(self-signed certificate - accept the browser warning)"
   printf '\n%sDone.%s\n' "$C_GREEN" "$C_RESET"
   if [[ $want_service -eq 1 ]]; then
     cat <<EOF
-  Open:      $url   (self-signed certificate - accept the browser warning)
-  Status:    systemctl status $SERVICE_NAME
+  Open:      $url   $note
+  Status:    bash $PROJECT_DIR/install_review_rdklog.sh --status
   Logs:      journalctl -u $SERVICE_NAME -f
   Update:    bash $PROJECT_DIR/install_review_rdklog.sh
   Uninstall: bash $PROJECT_DIR/install_review_rdklog.sh --uninstall
 EOF
   else
     cat <<EOF
-  Start:     $PROJECT_DIR/.venv/bin/python $PROJECT_DIR/app.py
-  Open:      $url   (self-signed certificate - accept the browser warning)
-  CLI:       $PROJECT_DIR/.venv/bin/review-rdk-logger <archive.tgz|directory>
+  Start:     cd $PROJECT_DIR && .venv/bin/review-rdk-web
+  Open:      $url   $note
 EOF
   fi
+  cat <<EOF
+  CLI:       $PROJECT_DIR/.venv/bin/review-rdk-logger <archive.tgz|directory>
+EOF
   [[ $healthy -eq 1 ]] || exit 1
 }
 
-if [[ "$ACTION" == "uninstall" ]]; then do_uninstall; else do_install; fi
+case "$ACTION" in
+  uninstall) do_uninstall ;;
+  status)    do_status ;;
+  *)         do_install ;;
+esac

@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: windows-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: python -m pytest -q
+      - run: review-rdk-web --version
+
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -S warning install_review_rdklog.sh
+      - name: install + service + health check
+        run: |
+          git branch -f ci-install HEAD
+          bash install_review_rdklog.sh --repo "$GITHUB_WORKSPACE" --branch ci-install \
+            --dir "$HOME/review_ci" --port 5099 --skip-packages
+          bash "$HOME/review_ci/install_review_rdklog.sh" --status
+      - name: service logs on failure
+        if: failure()
+        run: sudo journalctl -u review-rdklog -n 100 --no-pager || true
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t review-rdk-logger:ci .
+      - run: |
+          docker run -d --name review -p 5001:5001 review-rdk-logger:ci
+          for i in $(seq 1 20); do curl -fsk https://127.0.0.1:5001/healthz && exit 0; sleep 1; done
+          docker logs review; exit 1

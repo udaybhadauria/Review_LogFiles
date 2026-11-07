@@ -1,10 +1,6 @@
-import sys
-from pathlib import Path
+import os
+import tempfile
 
-ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "src"
-
-for path in (ROOT, SRC):
-    path_str = str(path)
-    if path_str not in sys.path:
-        sys.path.insert(0, path_str)
+# Must be set before review_rdk_logger.web is imported so tests never touch real data.
+os.environ["REVIEW_DATA_DIR"] = tempfile.mkdtemp(prefix="review_rdk_test_")
+os.environ.setdefault("FLASK_SECRET_KEY", "test")

@@ -1,9 +1,11 @@
 import io
+import json
 import tarfile
 
 import pytest
 
-import app as app_module
+from review_rdk_logger import __version__, cli
+from review_rdk_logger import web as app_module
 from review_rdk_logger.reviewer import is_log_member, review_tgz_bundle
 
 
@@ -96,5 +98,20 @@ def test_summary_and_delete_uploaded_archive(dirs, client, tmp_path):
     assert not (uploads / "up.tgz").exists()
 
 
-def test_healthz(client):
-    assert client.get("/healthz").get_json() == {"status": "ok"}
+def test_healthz_reports_version(client):
+    assert client.get("/healthz").get_json() == {"status": "ok", "version": __version__}
+
+
+def test_index_serves_packaged_ui(client):
+    res = client.get("/")
+    assert res.status_code == 200
+    assert f"v{__version__}" in res.get_data(as_text=True)
+    assert res.headers["X-Content-Type-Options"] == "nosniff"
+    assert client.get("/static/app.js").status_code == 200
+
+
+def test_cli_reviews_directory(tmp_path, capsys, monkeypatch):
+    _make_tgz(tmp_path / "a.tgz", {"x.log": "ERROR one\n"})
+    monkeypatch.setattr("sys.argv", ["review-rdk-logger", str(tmp_path)])
+    assert cli.main() == 0
+    assert json.loads(capsys.readouterr().out)[0]["keywords"] == {"ERROR": 1}

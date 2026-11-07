@@ -1,7 +1,7 @@
 import tarfile
 from pathlib import Path
 
-from app import extract_mac_candidates, build_archive_catalog
+from review_rdk_logger.web import build_archive_catalog, extract_mac_candidates
 
 
 def test_extract_mac_candidates_from_tarball_names():

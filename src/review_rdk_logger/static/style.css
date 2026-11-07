@@ -141,6 +141,7 @@ select.input { width: auto; cursor: pointer; }
 }
 .brand h1 { font-size: 17px; letter-spacing: 0.2px; }
 .brand p { margin: 0; font-size: 12px; }
+.version { margin-left: 6px; font: 600 10px var(--mono); color: var(--muted); vertical-align: middle; }
 .topbar-actions { display: flex; align-items: center; gap: 8px; }
 
 .upload-progress {

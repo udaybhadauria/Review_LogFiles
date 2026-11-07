@@ -1,0 +1,19 @@
+services:
+  review-rdklog:
+    build: .
+    image: review-rdk-logger:latest
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-5001}:5001"
+    environment:
+      # Generate one with: python -c "import secrets; print(secrets.token_hex(32))"
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:-}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-500}
+      # Optional: also list bundles from a mounted folder (see volumes below)
+      # ARCHIVE_DIR: /bundles
+    volumes:
+      - review-data:/data
+      # - /srv/rdk-logs:/bundles:ro
+
+volumes:
+  review-data:
