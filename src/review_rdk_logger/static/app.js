@@ -9,7 +9,7 @@
   const state = {
     catalog: { macs: [], by_mac: {} },
     mac: null,
-    archives: new Set(),
+    archive: null,
     summaries: new Map(),
     pending: new Set(),
     panes: [],
@@ -84,8 +84,7 @@
   const archivesForMac = (mac) => state.catalog.by_mac[mac] || [];
   const findArchive = (name) =>
     Object.values(state.catalog.by_mac).flat().find((entry) => entry.archive === name) || null;
-  const currentArchives = () => [...state.archives].map(name => findArchive(name)).filter(Boolean);
-  const getPrimaryArchive = () => [...state.archives][0] || null;
+  const currentArchive = () => archivesForMac(state.mac).find((a) => a.archive === state.archive) || null;
 
   function archiveTotals(name) {
     const summary = state.summaries.get(name);
@@ -122,38 +121,29 @@
     state.panes.filter((p) => !names.has(p.archive)).forEach((p) => closePane(p, false));
 
     if (!state.catalog.macs.includes(state.mac)) state.mac = state.catalog.macs[0] || null;
-    const validArchives = archivesForMac(state.mac).map(a => a.archive);
-    state.archives = new Set([...state.archives].filter(a => validArchives.includes(a)));
-    if (state.archives.size === 0 && validArchives.length > 0) {
-      state.archives.add(validArchives[0]);
+    if (!archivesForMac(state.mac).some((a) => a.archive === state.archive)) {
+      state.archive = archivesForMac(state.mac)[0]?.archive || null;
     }
     renderAll();
-    for (const archive of state.archives) ensureSummary(archive);
+    ensureSummary(state.archive);
   }
 
   // ---------- selection ----------
   function selectMac(mac) {
     if (mac === state.mac) return;
     state.mac = mac;
-    state.archives.clear();
-    const firstArchive = archivesForMac(mac)[0]?.archive || null;
-    if (firstArchive) state.archives.add(firstArchive);
+    state.archive = archivesForMac(mac)[0]?.archive || null;
     renderAll();
-    for (const archive of state.archives) ensureSummary(archive);
+    ensureSummary(state.archive);
     saveHash();
   }
 
-  function toggleArchive(name) {
-    if (state.archives.has(name)) {
-      if (state.archives.size > 1) {
-        state.archives.delete(name);
-      }
-    } else {
-      state.archives.add(name);
-      ensureSummary(name);
-    }
+  function selectArchive(name) {
+    if (name === state.archive) return;
+    state.archive = name;
     renderArchives();
     renderFiles();
+    ensureSummary(name);
     saveHash();
   }
 
@@ -162,7 +152,6 @@
     try {
       await api(`/api/archives/${encodeURIComponent(entry.archive)}`, { method: 'DELETE' });
       toast(`Deleted ${entry.archive}`, 'success');
-      state.archives.delete(entry.archive);
       await loadCatalog();
     } catch (err) {
       toast(`Delete failed: ${err.message}`, 'error');
@@ -216,14 +205,15 @@
     for (const entry of entries) {
       const scanning = state.pending.has(entry.archive);
       const item = el('div', {
-        class: `archive${state.archives.has(entry.archive) ? ' active' : ''}`,
+        class: `archive${entry.archive === state.archive ? ' active' : ''}`,
         title: entry.archive,
       },
         el('label', { class: 'toggle' },
           el('input', {
-            type: 'checkbox',
-            checked: state.archives.has(entry.archive),
-            onchange: (e) => { toggleArchive(entry.archive); }
+            type: 'radio',
+            name: 'archive',
+            checked: entry.archive === state.archive,
+            onchange: (e) => { if (e.target.checked) selectArchive(entry.archive); }
           }),
           el('span', { text: entry.archive })
         ),
@@ -254,26 +244,16 @@
   }
 
   function currentFiles() {
-    const entries = currentArchives();
-    if (!entries.length) return { all: [], shown: [] };
-    
-    // Collect files from all selected archives
-    const all = [];
-    for (const entry of entries) {
-      const summary = state.summaries.get(entry.archive);
-      for (const path of entry.log_files) {
-        all.push({
-          path,
-          name: basename(path),
-          dir: dirname(path),
-          size: entry.sizes?.[path] ?? 0,
-          archive: entry.archive,
-          archiveName: entry.archive,
-          counts: summary?.[path] || (summary ? { error: 0, warn: 0 } : null),
-        });
-      }
-    }
-    
+    const entry = currentArchive();
+    if (!entry) return { all: [], shown: [] };
+    const summary = state.summaries.get(entry.archive);
+    const all = entry.log_files.map((path) => ({
+      path,
+      name: basename(path),
+      dir: dirname(path),
+      size: entry.sizes?.[path] ?? 0,
+      counts: summary?.[path] || (summary ? { error: 0, warn: 0 } : null),
+    }));
     const q = state.fileQuery.toLowerCase();
     let shown = all.filter((f) =>
       (!q || f.path.toLowerCase().includes(q)) &&
@@ -292,8 +272,8 @@
   function renderFiles() {
     const list = $('#fileList');
     list.replaceChildren();
-    const entries = currentArchives();
-    if (!entries.length) {
+    const entry = currentArchive();
+    if (!entry) {
       $('#fileCount').textContent = '';
       list.append(el('p', { class: 'muted small', text: 'Select a bundle to list its log files.' }));
       return;
@@ -310,15 +290,14 @@
       frag.append(
         el('button', {
           type: 'button',
-          class: `file${open.has(keyOf(f.archive, f.path)) ? ' active' : ''}`,
-          title: `${f.archive} :: ${f.path}`,
-          onclick: () => openPane(f.archive, f.path),
+          class: `file${open.has(keyOf(entry.archive, f.path)) ? ' active' : ''}`,
+          title: f.path,
+          onclick: () => openPane(entry.archive, f.path),
         },
           el('span', { class: 'file-main' },
             el('span', { class: 'file-name', text: f.name }),
             f.dir ? el('span', { class: 'file-dir muted', text: f.dir }) : null),
           el('span', { class: 'file-side' },
-            el('span', { class: 'muted small mono', text: entries.length > 1 ? f.archiveName.substring(0, 12) + '…' : '' }),
             badges(f.counts),
             el('span', { class: 'file-size muted', text: fmtBytes(f.size) })))
       );
@@ -494,13 +473,13 @@
     $('#closeAllBtn').disabled = !count;
     $('#viewerHint').textContent = count
       ? `${count} of ${MAX_PANES} logs open`
-      : `${state.archives.size} bundle(s) selected — pick a log file to open`;
+      : `Open up to ${MAX_PANES} logs to compare them side by side.`;
 
     if (!count) {
       grid.replaceChildren(
         el('div', { class: 'viewer-empty' },
           el('div', { class: 'viewer-empty-icon' }, svgIcon('M7 3h7l5 5v13H7zM14 3v5h5M10 13h6M10 17h6')),
-          el('strong', { text: state.archives.size ? 'Pick a log file from the list' : 'Upload or select log bundles' }),
+          el('strong', { text: state.archive ? 'Pick a log file from the list' : 'Upload or select a log bundle' }),
           el('span', { class: 'muted', text: 'Errors are highlighted red, warnings amber. Use the arrows in a pane to jump between them.' }))
       );
       return;
@@ -544,7 +523,7 @@
         toast(`Uploaded ${data.saved.length} bundle(s)`, 'success');
         await loadCatalog();
         const entry = findArchive(data.saved[0]);
-        if (entry) { selectMac(entry.mac); state.archives.clear(); state.archives.add(entry.archive); renderAll(); }
+        if (entry) { selectMac(entry.mac); selectArchive(entry.archive); }
       }
     };
     xhr.send(form);
@@ -554,7 +533,7 @@
   function saveHash() {
     const params = new URLSearchParams();
     if (state.mac) params.set('mac', state.mac);
-    for (const archive of state.archives) params.append('archive', archive);
+    if (state.archive) params.set('archive', state.archive);
     state.panes.forEach((p) => params.append('open', keyOf(p.archive, p.path)));
     history.replaceState(null, '', `#${params}`);
   }
@@ -562,15 +541,11 @@
   function restoreHash() {
     const params = new URLSearchParams(location.hash.slice(1));
     const mac = params.get('mac');
-    const archives = params.getAll('archive');
+    const archive = params.get('archive');
     if (mac && state.catalog.macs.includes(mac)) state.mac = mac;
-    const validArchives = archivesForMac(state.mac).map(a => a.archive);
-    state.archives = new Set(archives.filter(a => validArchives.includes(a)));
-    if (state.archives.size === 0 && validArchives.length > 0) {
-      state.archives.add(validArchives[0]);
-    }
+    if (archive && archivesForMac(state.mac).some((a) => a.archive === archive)) state.archive = archive;
     renderAll();
-    for (const archive of state.archives) ensureSummary(archive);
+    ensureSummary(state.archive);
     for (const key of params.getAll('open')) {
       const idx = key.indexOf('::');
       const entry = findArchive(key.slice(0, idx));
@@ -640,8 +615,7 @@
     .then((catalog) => {
       state.catalog = catalog;
       state.mac = catalog.macs[0] || null;
-      const firstArchive = archivesForMac(state.mac)[0]?.archive || null;
-      if (firstArchive) state.archives.add(firstArchive);
+      state.archive = archivesForMac(state.mac)[0]?.archive || null;
       restoreHash();
     })
     .catch((err) => {
