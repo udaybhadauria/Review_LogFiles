@@ -267,8 +267,8 @@ setup_venv() {
     || die "Could not upgrade pip. $pip_hint"
   "$venv/bin/python" -m pip install -q --disable-pip-version-check -e "$PROJECT_DIR" \
     || die "Could not install Python dependencies. $pip_hint"
-  "$venv/bin/review-rdk-web" --version >/dev/null || die "Package installed but 'review-rdk-web' does not run."
-  ok "Installed $("$venv/bin/review-rdk-web" --version) into $venv"
+  REVIEW_DATA_DIR="$PROJECT_DIR" "$venv/bin/review-rdk-web" --version >/dev/null || die "Package installed but 'review-rdk-web' does not run."
+  ok "Installed $(REVIEW_DATA_DIR="$PROJECT_DIR" "$venv/bin/review-rdk-web" --version) into $venv"
 }
 
 set_env_var() {

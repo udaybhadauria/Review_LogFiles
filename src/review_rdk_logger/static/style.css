@@ -166,7 +166,11 @@ select.input { width: auto; cursor: pointer; }
   background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 12px;
 }
-.panel-grow { flex: 1; }
+.panel:not(.panel-grow) {
+  flex: none;
+  max-height: 240px;
+}
+.panel-grow { flex: 1; min-height: 0; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .panel-head h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
 
@@ -201,7 +205,7 @@ select.input { width: auto; cursor: pointer; }
 .file-tools { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
 .file-toggles { display: flex; align-items: center; gap: 12px; }
 .file-toggles select { margin-left: auto; }
-.file-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; margin: 0 -4px; padding: 0 4px; }
+.file-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; margin: 0 -4px; padding: 0 4px; min-height: 0; }
 .file { padding: 6px 8px; }
 .file.active { background: var(--accent-soft); }
 .file.active .file-name { color: var(--accent); }
