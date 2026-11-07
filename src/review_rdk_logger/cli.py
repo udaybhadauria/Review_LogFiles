@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import tarfile
 from pathlib import Path
 
 from .reviewer import review_directory, review_tgz_bundle
@@ -19,9 +20,8 @@ def main() -> int:
     args = parser.parse_args()
 
     target = Path(args.path)
-    if target.is_file() and target.suffix.lower() == ".tgz":
-        report = review_tgz_bundle(target)
-        data = report
+    if target.is_file() and tarfile.is_tarfile(target):
+        data = review_tgz_bundle(target)
     elif target.is_dir():
         data = review_directory(target)
     else:

@@ -1,12 +1,16 @@
 __pycache__/
 *.pyc
+*.egg-info/
+.pytest_cache/
 .venv/
 output/
 reports/
 uploads/
+certs/
 *.log
 *.tgz
 *.tar.gz
 *.pem
 .env
 .env.*
+!.env.example

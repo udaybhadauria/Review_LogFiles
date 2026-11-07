@@ -1,160 +1,411 @@
 #!/usr/bin/env bash
+#
+# Review LogFiles installer / updater.
+#
+# Works standalone (clones the repo itself) or from inside an existing checkout:
+#   curl -fsSL https://raw.githubusercontent.com/udaybhadauria/Review_LogFiles/main/install_review_rdklog.sh | bash
+#   curl -fsSL .../install_review_rdklog.sh | bash -s -- --dir /opt/review_logfiles --port 8443
+#   ./install_review_rdklog.sh --no-service
+#
+# Re-running the script is safe: it updates the code, dependencies and service in place.
 set -Eeuo pipefail
 
-export DEBIAN_FRONTEND=noninteractive
-
 REPO_URL="${REPO_URL:-https://github.com/udaybhadauria/Review_LogFiles.git}"
+BRANCH="${BRANCH:-main}"
 PROJECT_DIR="${PROJECT_DIR:-$HOME/Review_LogFiles}"
-SERVICE_NAME="${SERVICE_NAME:-review-rdklog.service}"
-APP_PORT="${APP_PORT:-5001}"
 APP_HOST="${APP_HOST:-0.0.0.0}"
-APP_USER="${APP_USER:-$(id -un)}"
-APP_GROUP="${APP_GROUP:-$(id -gn)}"
+APP_PORT="${APP_PORT:-5001}"
+SERVICE_NAME="${SERVICE_NAME:-review-rdklog}"
+INSTALL_SERVICE="auto"
+SKIP_PACKAGES=0
+OPEN_FIREWALL=0
+ALLOW_ROOT=0
+ACTION="install"
+ASSUME_YES=0
+DIR_FROM_USER=0
+PORT_FROM_USER=0
+HOST_FROM_USER=0
 
-echo "=== Review LogFiles install starting ==="
+if [[ -t 1 ]]; then
+  C_BLUE=$'\033[1;34m' C_YELLOW=$'\033[1;33m' C_RED=$'\033[1;31m' C_GREEN=$'\033[1;32m' C_RESET=$'\033[0m'
+else
+  C_BLUE="" C_YELLOW="" C_RED="" C_GREEN="" C_RESET=""
+fi
+step() { printf '\n%s==>%s %s\n' "$C_BLUE" "$C_RESET" "$*"; }
+info() { printf '    %s\n' "$*"; }
+ok()   { printf '%s[ok]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+warn() { printf '%s[warn]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+die()  { printf '%s[error]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
+trap 'die "Installer failed at line $LINENO: $BASH_COMMAND"' ERR
 
-if command -v sudo >/dev/null 2>&1; then
+usage() {
+  cat <<EOF
+Review LogFiles installer
+
+Usage: install_review_rdklog.sh [options]
+
+Options:
+  --dir PATH         Install directory            (default: \$HOME/Review_LogFiles)
+  --repo URL         Git repository to clone      (default: $REPO_URL)
+  --branch REF       Branch or tag to deploy      (default: $BRANCH)
+  --host ADDR        Address the app listens on   (default: $APP_HOST)
+  --port N           HTTPS port                   (default: $APP_PORT)
+  --service          Force systemd service install
+  --no-service       Do not install a systemd service
+  --service-name N   systemd unit name            (default: $SERVICE_NAME)
+  --open-firewall    Open the port in ufw/firewalld if active
+  --skip-packages    Do not install OS packages (git/python3/...)
+  --allow-root       Allow running as root (service will run as root)
+  --uninstall        Stop/remove the service and optionally the install dir
+  -y, --yes          Do not prompt for confirmation
+  -h, --help         Show this help
+
+Every option can also be given as an environment variable
+(REPO_URL, BRANCH, PROJECT_DIR, APP_HOST, APP_PORT, SERVICE_NAME).
+EOF
+}
+
+need_arg() { [[ $# -ge 2 && -n "$2" ]] || die "Option $1 requires a value"; }
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dir)          need_arg "$@"; PROJECT_DIR="$2"; DIR_FROM_USER=1; shift 2 ;;
+    --repo)         need_arg "$@"; REPO_URL="$2"; shift 2 ;;
+    --branch)       need_arg "$@"; BRANCH="$2"; shift 2 ;;
+    --host)         need_arg "$@"; APP_HOST="$2"; HOST_FROM_USER=1; shift 2 ;;
+    --port)         need_arg "$@"; APP_PORT="$2"; PORT_FROM_USER=1; shift 2 ;;
+    --service)      INSTALL_SERVICE="yes"; shift ;;
+    --no-service)   INSTALL_SERVICE="no"; shift ;;
+    --service-name) need_arg "$@"; SERVICE_NAME="$2"; shift 2 ;;
+    --open-firewall) OPEN_FIREWALL=1; shift ;;
+    --skip-packages) SKIP_PACKAGES=1; shift ;;
+    --allow-root)   ALLOW_ROOT=1; shift ;;
+    --uninstall)    ACTION="uninstall"; shift ;;
+    -y|--yes)       ASSUME_YES=1; shift ;;
+    -h|--help)      usage; exit 0 ;;
+    *)              usage >&2; die "Unknown option: $1" ;;
+  esac
+done
+
+[[ "$APP_PORT" =~ ^[0-9]+$ && "$APP_PORT" -ge 1 && "$APP_PORT" -le 65535 ]] || die "Invalid port: $APP_PORT"
+[[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "Invalid service name: $SERVICE_NAME"
+
+if [[ "$(id -u)" -eq 0 && $ALLOW_ROOT -eq 0 ]]; then
+  die "Do not run as root. Run as the user that should own the app (sudo is used only when needed), or pass --allow-root."
+fi
+if [[ "$(id -u)" -eq 0 ]]; then
+  SUDO=""
+elif command -v sudo >/dev/null 2>&1; then
   SUDO="sudo"
 else
   SUDO=""
+  warn "sudo not found; OS package and service steps may fail."
 fi
 
-if command -v systemctl >/dev/null 2>&1; then
-  SYSTEMCTL_AVAILABLE=true
-else
-  SYSTEMCTL_AVAILABLE=false
-fi
+HAS_SYSTEMD=0
+if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then HAS_SYSTEMD=1; fi
+UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 
-if command -v apt-get >/dev/null 2>&1; then
-  echo "=== Step 0: Install base packages ==="
-  ${SUDO} apt-get update
-  ${SUDO} apt-get install -y git curl python3 python3-venv python3-pip ca-certificates
+# When executed from inside an existing checkout, deploy that checkout instead of cloning.
+SELF="${BASH_SOURCE[0]:-}"
+if [[ $DIR_FROM_USER -eq 0 && -n "$SELF" && -f "$SELF" ]]; then
+  SELF_DIR="$(cd -- "$(dirname -- "$SELF")" && pwd)"
+  if [[ -d "$SELF_DIR/.git" && -f "$SELF_DIR/app.py" ]]; then PROJECT_DIR="$SELF_DIR"; fi
 fi
+PROJECT_DIR="${PROJECT_DIR%/}"
 
-if [[ -n "${SUDO}" && "${SYSTEMCTL_AVAILABLE}" == true ]]; then
-  echo "=== Step 1: Stop any existing service ==="
-  ${SUDO} systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
-fi
+confirm() {
+  [[ $ASSUME_YES -eq 1 ]] && return 0
+  local answer=""
+  if [[ -r /dev/tty ]]; then read -r -p "$1 [y/N] " answer </dev/tty || true; fi
+  [[ "$answer" =~ ^[Yy]$ ]]
+}
 
-if command -v fuser >/dev/null 2>&1; then
-  echo "=== Step 2: Free port ${APP_PORT} if needed ==="
-  fuser -k "${APP_PORT}/tcp" 2>/dev/null || true
-fi
+service_exists() { [[ $HAS_SYSTEMD -eq 1 && -f "$UNIT_PATH" ]]; }
 
-if [[ -d "${PROJECT_DIR}/.git" ]]; then
-  echo "=== Step 3: Updating existing repo ==="
-  git -C "${PROJECT_DIR}" fetch --all --prune || true
-  if git -C "${PROJECT_DIR}" rev-parse --verify HEAD >/dev/null 2>&1; then
-    git -C "${PROJECT_DIR}" pull --ff-only || true
+# ---------------------------------------------------------------------------
+
+install_packages() {
+  [[ $SKIP_PACKAGES -eq 1 ]] && { info "Skipping OS packages (--skip-packages)"; return; }
+  if command -v apt-get >/dev/null 2>&1; then
+    if command -v fuser >/dev/null 2>&1; then
+      while $SUDO fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+        info "Waiting for another apt/dpkg process to finish..."
+        sleep 3
+      done
+    fi
+    $SUDO apt-get update -qq
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+      git curl ca-certificates python3 python3-venv python3-pip >/dev/null
+  elif command -v dnf >/dev/null 2>&1; then
+    $SUDO dnf install -y -q git curl ca-certificates python3 python3-pip
+  elif command -v yum >/dev/null 2>&1; then
+    $SUDO yum install -y -q git curl ca-certificates python3 python3-pip
+  elif command -v zypper >/dev/null 2>&1; then
+    $SUDO zypper --non-interactive install git curl ca-certificates python3 python3-pip
+  elif command -v apk >/dev/null 2>&1; then
+    $SUDO apk add --no-cache git curl ca-certificates python3 py3-pip
+  elif command -v pacman >/dev/null 2>&1; then
+    $SUDO pacman -Sy --noconfirm --needed git curl ca-certificates python python-pip
+  elif command -v brew >/dev/null 2>&1; then
+    brew install git python3
   else
-    echo "ERROR: repo exists but is empty. Push the app code to the remote repo first or use a repo with files."
-    exit 1
+    warn "No supported package manager found; assuming git, curl and python3 are installed."
   fi
-else
-  echo "=== Step 3: Cloning repo ==="
-  rm -rf "${PROJECT_DIR}"
-  git clone "${REPO_URL}" "${PROJECT_DIR}"
-  if ! git -C "${PROJECT_DIR}" rev-parse --verify HEAD >/dev/null 2>&1; then
-    echo "ERROR: repo cloned successfully but is empty. The repository has no committed files yet."
-    echo "Fix: push the app files to GitHub or clone the actual project repo before running this installer."
-    exit 1
+  for cmd in git curl; do command -v "$cmd" >/dev/null 2>&1 || die "'$cmd' is required but not installed."; done
+}
+
+find_python() {
+  local candidate
+  PYTHON=""
+  for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
+    if command -v "$candidate" >/dev/null 2>&1 \
+      && "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+      PYTHON="$(command -v "$candidate")"
+      break
+    fi
+  done
+  [[ -n "$PYTHON" ]] || die "Python 3.10+ is required. Found: $(python3 -V 2>&1 || echo none)"
+  ok "Using $("$PYTHON" -V 2>&1) ($PYTHON)"
+}
+
+sync_repo() {
+  if [[ -d "$PROJECT_DIR/.git" ]]; then
+    local origin
+    origin="$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/null || true)"
+    [[ -n "$origin" && "$origin" != "$REPO_URL" ]] && warn "Existing checkout tracks $origin (not $REPO_URL); keeping it."
+    if [[ -n "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=no)" ]]; then
+      local stash="installer-$(date +%Y%m%d-%H%M%S)"
+      warn "Local changes found; stashing them as '$stash' (restore with: git -C $PROJECT_DIR stash pop)"
+      git -C "$PROJECT_DIR" stash push -q -m "$stash"
+    fi
+    info "Fetching $BRANCH"
+    git -C "$PROJECT_DIR" fetch -q --tags origin "$BRANCH" || die "Could not fetch '$BRANCH' from origin."
+    if git -C "$PROJECT_DIR" show-ref -q --verify "refs/tags/$BRANCH"; then
+      git -C "$PROJECT_DIR" -c advice.detachedHead=false checkout -q "tags/$BRANCH"
+    else
+      git -C "$PROJECT_DIR" checkout -q "$BRANCH" 2>/dev/null \
+        || git -C "$PROJECT_DIR" checkout -q -b "$BRANCH" "origin/$BRANCH"
+      git -C "$PROJECT_DIR" merge -q --ff-only "origin/$BRANCH" \
+        || die "Local branch '$BRANCH' has diverged from origin; resolve it manually in $PROJECT_DIR."
+    fi
+  else
+    if [[ -e "$PROJECT_DIR" && -n "$(ls -A "$PROJECT_DIR" 2>/dev/null)" ]]; then
+      die "$PROJECT_DIR exists, is not empty and is not a git checkout. Choose another --dir."
+    fi
+    info "Cloning $REPO_URL ($BRANCH) into $PROJECT_DIR"
+    mkdir -p "$(dirname "$PROJECT_DIR")"
+    git clone -q --depth 1 --branch "$BRANCH" "$REPO_URL" "$PROJECT_DIR" \
+      || die "git clone failed. Check the URL/branch and your network or credentials."
   fi
-fi
+  [[ -f "$PROJECT_DIR/app.py" && -f "$PROJECT_DIR/requirements.txt" ]] \
+    || die "$PROJECT_DIR does not look like the Review LogFiles project (app.py/requirements.txt missing)."
+  ok "Code at $(git -C "$PROJECT_DIR" rev-parse --short HEAD) ($(git -C "$PROJECT_DIR" log -1 --format=%s | cut -c1-60))"
+}
 
-cd "${PROJECT_DIR}"
-
-if [[ ! -f requirements.txt || ! -f app.py ]]; then
-  echo "ERROR: requirements.txt and app.py were not found in ${PROJECT_DIR}."
-  echo "This usually means the repo is empty or the wrong repository was cloned."
-  exit 1
-fi
-
-echo "=== Step 4: Clean stale runtime files ==="
-rm -rf .venv __pycache__ .pytest_cache .mypy_cache uploads 2>/dev/null || true
-mkdir -p uploads
-
-if [[ ! -f .env ]]; then
-  cp .env.example .env 2>/dev/null || true
-fi
-
-if [[ -f .env ]]; then
-  echo "=== Step 5: Create default app environment config ==="
-  if ! grep -q '^APP_PORT=' .env 2>/dev/null; then
-    printf '\nAPP_PORT=%s\nAPP_HOST=%s\nFLASK_SECRET_KEY=%s\n' "${APP_PORT}" "${APP_HOST}" "$(openssl rand -hex 32 2>/dev/null || python3 - <<'PY'
-import secrets
-print(secrets.token_hex(32))
-PY
-)" >> .env
+setup_venv() {
+  local venv="$PROJECT_DIR/.venv"
+  if [[ -x "$venv/bin/python" ]] && ! "$venv/bin/python" -c 'import sys' >/dev/null 2>&1; then
+    warn "Existing virtualenv is broken; recreating it."
+    rm -rf -- "$venv"
   fi
-fi
+  if [[ ! -x "$venv/bin/python" ]]; then
+    info "Creating virtualenv"
+    if ! "$PYTHON" -m venv "$venv" 2>/dev/null; then
+      rm -rf -- "$venv"
+      local ver
+      ver="$("$PYTHON" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+      if command -v apt-get >/dev/null 2>&1 && [[ $SKIP_PACKAGES -eq 0 ]]; then
+        info "Installing python${ver}-venv"
+        $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "python${ver}-venv" >/dev/null
+        "$PYTHON" -m venv "$venv"
+      else
+        die "Could not create a virtualenv. Install the venv module for Python $ver."
+      fi
+    fi
+  fi
+  info "Installing Python dependencies"
+  "$venv/bin/python" -m pip install -q --disable-pip-version-check --upgrade pip setuptools wheel
+  "$venv/bin/python" -m pip install -q --disable-pip-version-check -r "$PROJECT_DIR/requirements.txt"
+  "$venv/bin/python" -m pip install -q --disable-pip-version-check -e "$PROJECT_DIR"
+  ok "Virtualenv ready ($venv)"
+}
 
-echo "=== Step 6: Create virtual environment ==="
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-pip install -r requirements.txt
+set_env_var() {
+  local file="$1" key="$2" value="$3"
+  if grep -q "^${key}=" "$file"; then
+    local tmp
+    tmp="$(mktemp)"
+    awk -v k="$key" -v v="$value" 'BEGIN{FS=OFS="="} $1==k {print k "=" v; next} {print}' "$file" >"$tmp"
+    cat "$tmp" >"$file" && rm -f "$tmp"
+  else
+    printf '%s=%s\n' "$key" "$value" >>"$file"
+  fi
+}
 
-if [[ -f setup_review_rdklog.sh ]]; then
-  echo "=== Step 7: Run project setup hook ==="
-  bash setup_review_rdklog.sh || true
-fi
+setup_env() {
+  local env_file="$PROJECT_DIR/.env"
+  if [[ ! -f "$env_file" ]]; then
+    info "Creating $env_file"
+    (umask 077; : >"$env_file")
+    [[ -f "$PROJECT_DIR/.env.example" ]] && grep -v '^FLASK_SECRET_KEY=' "$PROJECT_DIR/.env.example" >"$env_file" || true
+    HOST_FROM_USER=1 PORT_FROM_USER=1
+  fi
+  chmod 600 "$env_file"
+  [[ $HOST_FROM_USER -eq 1 ]] && set_env_var "$env_file" APP_HOST "$APP_HOST"
+  [[ $PORT_FROM_USER -eq 1 ]] && set_env_var "$env_file" APP_PORT "$APP_PORT"
+  if ! grep -Eq '^FLASK_SECRET_KEY=.{32,}' "$env_file" || grep -q '^FLASK_SECRET_KEY=change-me' "$env_file"; then
+    set_env_var "$env_file" FLASK_SECRET_KEY "$("$PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+  fi
+  # The effective port is whatever .env says (it may have been customised earlier).
+  APP_PORT="$(sed -n 's/^APP_PORT=//p' "$env_file" | tail -n1)"
+  APP_PORT="${APP_PORT:-5001}"
+  mkdir -p "$PROJECT_DIR/uploads"
+  ok "Configuration in $env_file (port $APP_PORT)"
+}
 
-if [[ -f app.py ]]; then
-  echo "=== Step 8: Smoke test the app locally ==="
-  nohup python app.py >/tmp/review_rdklog_app.log 2>&1 &
-  sleep 4
-  curl -k -fsI "https://127.0.0.1:${APP_PORT}/" >/dev/null || echo "WARN: local smoke test did not respond yet"
-  pkill -f "python app.py" 2>/dev/null || true
-fi
+port_in_use() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnH "sport = :$1" 2>/dev/null | grep -q .
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
 
-if [[ "${SYSTEMCTL_AVAILABLE}" == true ]]; then
-  echo "=== Step 9: Create systemd service ==="
-  cat > "/etc/systemd/system/${SERVICE_NAME}" <<EOF
+install_service() {
+  local run_user run_group
+  run_user="$(id -un)"
+  run_group="$(id -gn)"
+  info "Writing $UNIT_PATH"
+  $SUDO tee "$UNIT_PATH" >/dev/null <<EOF
 [Unit]
-Description=Review LogFiles HTTPS App
-After=network.target
+Description=Review LogFiles (RDK log review web app)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=${APP_USER}
-Group=${APP_GROUP}
+User=${run_user}
+Group=${run_group}
 WorkingDirectory=${PROJECT_DIR}
-Environment=APP_PORT=${APP_PORT}
-Environment=APP_HOST=${APP_HOST}
-Environment=FLASK_SECRET_KEY=${APP_SECRET_KEY:-$(openssl rand -hex 32 2>/dev/null || python3 - <<'PY'
-import secrets
-print(secrets.token_hex(32))
-PY
-)}
+EnvironmentFile=${PROJECT_DIR}/.env
 ExecStart=${PROJECT_DIR}/.venv/bin/python ${PROJECT_DIR}/app.py
-Restart=always
+Restart=on-failure
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
+  $SUDO systemctl daemon-reload
+  if ! $SUDO systemctl is-active -q "$SERVICE_NAME" && port_in_use "$APP_PORT"; then
+    warn "Port $APP_PORT is already used by another process; the service may fail to start."
+  fi
+  $SUDO systemctl enable -q "$SERVICE_NAME"
+  $SUDO systemctl restart "$SERVICE_NAME"
+  ok "Service $SERVICE_NAME enabled and (re)started"
+}
 
-  ${SUDO} systemctl daemon-reload
-  ${SUDO} systemctl enable --now "${SERVICE_NAME}"
-  ${SUDO} systemctl status "${SERVICE_NAME}" --no-pager || true
-fi
+open_firewall() {
+  [[ $OPEN_FIREWALL -eq 1 ]] || return 0
+  if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -q "Status: active"; then
+    $SUDO ufw allow "${APP_PORT}/tcp" >/dev/null && ok "ufw: opened ${APP_PORT}/tcp"
+  elif command -v firewall-cmd >/dev/null 2>&1 && $SUDO firewall-cmd --state >/dev/null 2>&1; then
+    $SUDO firewall-cmd -q --permanent --add-port="${APP_PORT}/tcp" && $SUDO firewall-cmd -q --reload \
+      && ok "firewalld: opened ${APP_PORT}/tcp"
+  else
+    info "No active ufw/firewalld found; nothing to open."
+  fi
+}
 
-if [[ -d "${PROJECT_DIR}" ]]; then
-  chown -R "${APP_USER}:${APP_GROUP}" "${PROJECT_DIR}" 2>/dev/null || true
-  find "${PROJECT_DIR}" -type d -exec chmod 755 {} +
-  find "${PROJECT_DIR}" -type f -exec chmod 644 {} +
-  chmod 700 "${PROJECT_DIR}/.venv" 2>/dev/null || true
-fi
+health_check() {
+  info "Waiting for https://127.0.0.1:${APP_PORT}/healthz"
+  local _
+  for _ in $(seq 1 20); do
+    if curl -fsk --max-time 2 "https://127.0.0.1:${APP_PORT}/healthz" >/dev/null 2>&1; then
+      ok "App is responding"
+      return 0
+    fi
+    sleep 1
+  done
+  warn "App did not respond within 20s. Inspect: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+  return 1
+}
 
-if [[ "${SYSTEMCTL_AVAILABLE}" == true ]]; then
-  echo "=== Step 10: Final service smoke test ==="
-  ${SUDO} systemctl is-active "${SERVICE_NAME}" || echo "WARN: service is not active yet"
-  curl -k -fsI "https://127.0.0.1:${APP_PORT}/" >/dev/null || echo "WARN: service endpoint not responding yet; check journalctl -u ${SERVICE_NAME}"
-fi
+primary_ip() {
+  local ip=""
+  command -v hostname >/dev/null 2>&1 && ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
+  [[ -z "$ip" ]] && command -v ip >/dev/null 2>&1 && ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')"
+  echo "${ip:-127.0.0.1}"
+}
 
-echo ""
-echo "Review LogFiles installation complete."
-echo "Project directory: ${PROJECT_DIR}"
-echo "Service: ${SERVICE_NAME}"
-echo "HTTPS URL: https://127.0.0.1:${APP_PORT}/"
-echo "Logs: journalctl -u ${SERVICE_NAME} -f"
+do_uninstall() {
+  step "Uninstalling Review LogFiles"
+  if service_exists; then
+    $SUDO systemctl disable --now -q "$SERVICE_NAME" 2>/dev/null || true
+    $SUDO rm -f "$UNIT_PATH"
+    $SUDO systemctl daemon-reload
+    ok "Removed service $SERVICE_NAME"
+  else
+    info "No service named $SERVICE_NAME installed"
+  fi
+  if [[ -d "$PROJECT_DIR" ]]; then
+    if confirm "Delete $PROJECT_DIR (including uploads/ and .env)?"; then
+      rm -rf -- "$PROJECT_DIR"
+      ok "Deleted $PROJECT_DIR"
+    else
+      info "Kept $PROJECT_DIR"
+    fi
+  fi
+}
+
+do_install() {
+  printf '%sReview LogFiles installer%s\n' "$C_BLUE" "$C_RESET"
+  info "Directory : $PROJECT_DIR"
+  info "Repository: $REPO_URL ($BRANCH)"
+
+  step "1/5 OS packages";        install_packages
+  step "2/5 Python";             find_python
+  step "3/5 Source code";        sync_repo
+  step "4/5 Dependencies";       setup_venv
+  step "5/5 Configuration";      setup_env
+
+  local want_service=0
+  case "$INSTALL_SERVICE" in
+    yes) [[ $HAS_SYSTEMD -eq 1 ]] || die "--service requested but systemd is not available."; want_service=1 ;;
+    auto) [[ $HAS_SYSTEMD -eq 1 ]] && want_service=1 ;;
+  esac
+
+  local healthy=1
+  if [[ $want_service -eq 1 ]]; then
+    step "Service"
+    install_service
+    open_firewall
+    health_check || healthy=0
+  else
+    open_firewall
+  fi
+
+  local url="https://$(primary_ip):${APP_PORT}"
+  printf '\n%sDone.%s\n' "$C_GREEN" "$C_RESET"
+  if [[ $want_service -eq 1 ]]; then
+    cat <<EOF
+  Open:      $url   (self-signed certificate - accept the browser warning)
+  Status:    systemctl status $SERVICE_NAME
+  Logs:      journalctl -u $SERVICE_NAME -f
+  Update:    bash $PROJECT_DIR/install_review_rdklog.sh
+  Uninstall: bash $PROJECT_DIR/install_review_rdklog.sh --uninstall
+EOF
+  else
+    cat <<EOF
+  Start:     $PROJECT_DIR/.venv/bin/python $PROJECT_DIR/app.py
+  Open:      $url   (self-signed certificate - accept the browser warning)
+  CLI:       $PROJECT_DIR/.venv/bin/review-rdk-logger <archive.tgz|directory>
+EOF
+  fi
+  [[ $healthy -eq 1 ]] || exit 1
+}
+
+if [[ "$ACTION" == "uninstall" ]]; then do_uninstall; else do_install; fi

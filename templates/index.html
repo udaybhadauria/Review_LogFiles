@@ -1,185 +1,149 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RDK Log Review</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%233b82f6'/><path d='M9 10h14M9 16h10M9 22h6' stroke='white' stroke-width='3' stroke-linecap='round'/></svg>" />
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+    <script>
+      document.documentElement.dataset.theme =
+        localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    </script>
   </head>
   <body>
-    <div class="page-shell">
-      <header class="topbar">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
         <div>
           <h1>RDK Log Review</h1>
-          <p>Upload .tgz log bundles and inspect the most relevant logs side-by-side.</p>
+          <p id="globalStats" class="muted">Loading…</p>
         </div>
-      </header>
-
-      <section class="upload-panel">
-        <form action="/upload" method="post" enctype="multipart/form-data">
-          <label class="upload-label" for="archives">Upload log tarballs (.tgz)</label>
-          <input id="archives" name="archives" type="file" multiple accept=".tgz,.tar.gz" />
-          <button type="submit">Load logs</button>
-        </form>
-      </section>
-
-      <section class="controls">
-        <div class="field-group">
-          <label for="macSelect">Select MAC</label>
-          <select id="macSelect"></select>
+      </div>
+      <div class="topbar-actions">
+        <div id="uploadProgress" class="upload-progress" hidden>
+          <div class="upload-progress-bar"></div>
+          <span class="upload-progress-label"></span>
         </div>
-      </section>
+        <label class="btn btn-primary" for="fileInput" title="Upload .tgz bundles (or drop them anywhere)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" /></svg>
+          Upload logs
+        </label>
+        <input id="fileInput" type="file" multiple accept=".tgz,.tar.gz,application/gzip" hidden />
+        <button id="refreshBtn" class="btn btn-icon" type="button" title="Rescan archives">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" /></svg>
+        </button>
+        <button id="themeBtn" class="btn btn-icon" type="button" title="Toggle light/dark theme">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" /></svg>
+        </button>
+      </div>
+    </header>
 
-      <section class="log-picker-panel">
-        <div class="picker-header">
-          <h2>Available log files</h2>
-          <span id="selectionHint">Choose up to 3 logs</span>
+    <div class="layout">
+      <aside class="sidebar">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Devices</h2>
+            <span id="deviceCount" class="chip"></span>
+          </div>
+          <div id="deviceList" class="device-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Bundles</h2>
+            <span id="archiveCount" class="chip"></span>
+          </div>
+          <div id="archiveList" class="archive-list"></div>
+        </section>
+
+        <section class="panel panel-grow">
+          <div class="panel-head">
+            <h2>Log files</h2>
+            <span id="fileCount" class="chip"></span>
+          </div>
+          <div class="file-tools">
+            <input id="fileSearch" class="input" type="search" placeholder="Filter files…  ( / )" autocomplete="off" />
+            <div class="file-toggles">
+              <label class="toggle"><input id="hideEmpty" type="checkbox" checked /> Hide empty</label>
+              <label class="toggle"><input id="issuesOnly" type="checkbox" /> With issues</label>
+              <select id="fileSort" class="input input-sm" title="Sort files">
+                <option value="name">Name</option>
+                <option value="issues">Most issues</option>
+                <option value="size">Largest</option>
+              </select>
+            </div>
+          </div>
+          <div id="fileList" class="file-list"></div>
+        </section>
+      </aside>
+
+      <main class="viewer">
+        <div class="viewer-toolbar">
+          <div class="muted" id="viewerHint">Open up to 4 logs to compare them side by side.</div>
+          <div class="viewer-actions">
+            <div class="segmented" role="group" aria-label="Columns">
+              <button type="button" data-cols="1" title="One column">1</button>
+              <button type="button" data-cols="2" title="Two columns">2</button>
+              <button type="button" data-cols="3" title="Three columns">3</button>
+            </div>
+            <button id="closeAllBtn" class="btn btn-ghost" type="button">Close all</button>
+          </div>
         </div>
-        <div id="logList" class="log-list"></div>
-      </section>
-
-      <section class="viewer-panel">
         <div id="viewerGrid" class="viewer-grid"></div>
-      </section>
+      </main>
     </div>
 
-    <script>
-      const initialCatalog = {{ catalog | tojson }};
-      const MAX_LOGS = 3;
-      const state = {
-        selectedMac: '',
-        selectedFiles: []
-      };
+    <div id="dropOverlay" class="drop-overlay" hidden>
+      <div class="drop-card">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" /></svg>
+        <strong>Drop .tgz log bundles to upload</strong>
+      </div>
+    </div>
+    <div id="toasts" class="toasts" aria-live="polite"></div>
 
-      function getFilesForMac(mac) {
-        const entries = initialCatalog.by_mac?.[mac] || [];
-        const files = [];
-        entries.forEach((entry) => {
-          entry.log_files.forEach((path) => {
-            files.push({
-              archive: entry.archive,
-              path,
-              label: `${entry.archive} :: ${path}`
-            });
-          });
-        });
-        return files;
-      }
+    <template id="paneTemplate">
+      <article class="pane">
+        <header class="pane-head">
+          <div class="pane-title">
+            <strong class="pane-name"></strong>
+            <span class="pane-path muted"></span>
+          </div>
+          <div class="pane-actions">
+            <button class="btn btn-icon btn-sm" data-act="prev-issue" type="button" title="Previous error/warning">
+              <svg viewBox="0 0 24 24"><path d="m6 15 6-6 6 6" /></svg>
+            </button>
+            <button class="btn btn-icon btn-sm" data-act="next-issue" type="button" title="Next error/warning">
+              <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></svg>
+            </button>
+            <button class="btn btn-icon btn-sm" data-act="wrap" type="button" title="Toggle line wrap">
+              <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h13a3 3 0 0 1 0 6h-4m0 0 2-2m-2 2 2 2M4 18h5" /></svg>
+            </button>
+            <a class="btn btn-icon btn-sm" data-act="download" title="Download file">
+              <svg viewBox="0 0 24 24"><path d="M12 4v12m0 0-4-4m4 4 4-4M4 20h16" /></svg>
+            </a>
+            <button class="btn btn-icon btn-sm" data-act="close" type="button" title="Close">
+              <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg>
+            </button>
+          </div>
+        </header>
+        <div class="pane-tools">
+          <div class="search-box">
+            <input class="input input-sm pane-search" type="search" placeholder="Search (Enter / Shift+Enter)" autocomplete="off" />
+            <span class="match-count muted"></span>
+          </div>
+          <label class="toggle"><input class="pane-only" type="checkbox" /> Only matches</label>
+          <select class="input input-sm pane-level" title="Severity filter">
+            <option value="all">All lines</option>
+            <option value="issues">Warnings + errors</option>
+            <option value="err">Errors only</option>
+          </select>
+        </div>
+        <div class="pane-stats"></div>
+        <div class="pane-body"><div class="log-lines"><div class="pane-message">Loading…</div></div></div>
+      </article>
+    </template>
 
-      function renderMacs() {
-        const macSelect = document.getElementById('macSelect');
-        macSelect.innerHTML = '';
-
-        const macs = initialCatalog.macs || [];
-        if (!macs.length) {
-          const option = document.createElement('option');
-          option.textContent = 'No tarballs found';
-          macSelect.appendChild(option);
-          return;
-        }
-
-        macs.forEach((mac) => {
-          const option = document.createElement('option');
-          option.value = mac;
-          option.textContent = mac;
-          macSelect.appendChild(option);
-        });
-
-        if (!state.selectedMac && macs.length) {
-          state.selectedMac = macs[0];
-        }
-        macSelect.value = state.selectedMac;
-      }
-
-      function renderFileList() {
-        const mac = state.selectedMac;
-        const fileList = document.getElementById('logList');
-        fileList.innerHTML = '';
-
-        const files = getFilesForMac(mac);
-        if (!files.length) {
-          fileList.innerHTML = '<p class="empty-state">No log files were found for this MAC.</p>';
-          return;
-        }
-
-        files.forEach((file) => {
-          const wrapper = document.createElement('label');
-          wrapper.className = 'log-option';
-
-          const input = document.createElement('input');
-          input.type = 'checkbox';
-          input.value = `${file.archive}::${file.path}`;
-          input.checked = state.selectedFiles.includes(input.value);
-          input.addEventListener('change', () => {
-            const key = input.value;
-            if (input.checked) {
-              if (state.selectedFiles.length >= MAX_LOGS) {
-                input.checked = false;
-                return;
-              }
-              state.selectedFiles.push(key);
-            } else {
-              state.selectedFiles = state.selectedFiles.filter((item) => item !== key);
-            }
-            renderFileList();
-            renderViewer();
-          });
-
-          if (state.selectedFiles.length >= MAX_LOGS && !input.checked) {
-            input.disabled = true;
-          }
-
-          const labelText = document.createElement('span');
-          labelText.textContent = file.label;
-
-          wrapper.appendChild(input);
-          wrapper.appendChild(labelText);
-          fileList.appendChild(wrapper);
-        });
-      }
-
-      async function renderViewer() {
-        const viewerGrid = document.getElementById('viewerGrid');
-        viewerGrid.innerHTML = '';
-
-        const keys = state.selectedFiles.slice(0, MAX_LOGS);
-        if (!keys.length) {
-          viewerGrid.innerHTML = '<div class="empty-state">Select up to 3 logs to view them here.</div>';
-          return;
-        }
-
-        for (const key of keys) {
-          const [archive, path] = key.split('::');
-          const item = document.createElement('div');
-          item.className = 'log-pane';
-          item.innerHTML = '<div class="pane-header"><strong>' + path + '</strong></div><pre class="log-content">Loading...</pre>';
-          viewerGrid.appendChild(item);
-
-          try {
-            const response = await fetch(`/api/log-content?archive=${encodeURIComponent(archive)}&path=${encodeURIComponent(path)}`);
-            const data = await response.json();
-            const contentNode = item.querySelector('.log-content');
-            contentNode.textContent = data.content || 'No content available for this log file.';
-          } catch (error) {
-            const contentNode = item.querySelector('.log-content');
-            contentNode.textContent = 'Unable to load log content.';
-          }
-        }
-      }
-
-      document.getElementById('macSelect').addEventListener('change', (event) => {
-        state.selectedMac = event.target.value;
-        state.selectedFiles = [];
-        renderFileList();
-        renderViewer();
-      });
-
-      renderMacs();
-      if (initialCatalog.macs && initialCatalog.macs.length) {
-        state.selectedMac = initialCatalog.macs[0];
-        renderFileList();
-        renderViewer();
-      }
-    </script>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
   </body>
 </html>

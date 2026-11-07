@@ -1,78 +1,88 @@
 from __future__ import annotations
 
-import json
 import re
 import tarfile
-import tempfile
+from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
-KEYWORD_PATTERN = re.compile(r"\b(ERROR|WARN|WARNING|PANIC|FAIL|FAILED|EXCEPTION|CRITICAL|SEGFAULT|TRACEBACK|FATAL)\b", re.IGNORECASE)
-
-
-def _safe_read_text(path: Path) -> str:
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return ""
-
-    if not data or b"\x00" in data:
-        return ""
-
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        return data.decode("utf-8", errors="replace")
+KEYWORD_PATTERN = re.compile(
+    r"\b(ERROR|WARN|WARNING|PANIC|FAIL|FAILED|EXCEPTION|CRITICAL|SEGFAULT|TRACEBACK|FATAL)\b", re.IGNORECASE
+)
+WARN_KEYWORDS = frozenset({"WARN", "WARNING"})
+LOG_SUFFIXES = frozenset({".log", ".txt", ".out", ".cfg", ".xml", ".json", ".csv", ".ini", ".conf", ".db", ""})
+ARCHIVE_GLOBS = ("*.tgz", "*.tar.gz")
+_ROTATION_SUFFIX = re.compile(r"(\.\d+)+$")
 
 
-def _collect_log_files(extract_root: Path) -> list[Path]:
-    files: list[Path] = []
-    for path in extract_root.rglob("*"):
-        if path.is_file() and path.suffix.lower() in {".log", ".txt", ".out", ".cfg", ".xml", ""}:
-            files.append(path)
-    return sorted(files)
+def is_log_member(name: str) -> bool:
+    """True for text-like log files, including rotated ones such as ``PAMlog.txt.0``."""
+    base = _ROTATION_SUFFIX.sub("", name.rsplit("/", 1)[-1])
+    return bool(base) and Path(base).suffix.lower() in LOG_SUFFIXES
 
 
-def _extract_archive(archive_path: Path) -> Path:
-    extract_root = Path(tempfile.mkdtemp(prefix="review_rdk_logger_"))
-    with tarfile.open(archive_path, "r:gz") as archive:
-        archive.extractall(path=extract_root, filter="data")
-    return extract_root
+def decode_text(data: bytes) -> str | None:
+    if b"\x00" in data[:8192]:
+        return None
+    return data.decode("utf-8", errors="replace")
+
+
+def scan_text(text: str) -> Counter[str]:
+    return Counter(match.upper() for match in KEYWORD_PATTERN.findall(text))
+
+
+def severity_counts(hits: Counter[str]) -> dict[str, int]:
+    warn = sum(count for key, count in hits.items() if key in WARN_KEYWORDS)
+    return {"error": sum(hits.values()) - warn, "warn": warn}
+
+
+def find_archives(directory: str | Path) -> list[Path]:
+    target = Path(directory)
+    return sorted({path for pattern in ARCHIVE_GLOBS for path in target.glob(pattern) if path.is_file()})
+
+
+def iter_archive_logs(archive_path: str | Path) -> Iterator[tuple[str, str]]:
+    """Yield ``(member_name, text)`` for every text log inside the archive, without extracting to disk."""
+    with tarfile.open(archive_path, "r:*") as archive:
+        for member in archive:
+            if not member.isfile() or not is_log_member(member.name):
+                continue
+            handle = archive.extractfile(member)
+            if handle is None:
+                continue
+            text = decode_text(handle.read())
+            if text is not None:
+                yield member.name, text
+
+
+def summarize_archive(archive_path: str | Path) -> dict[str, dict[str, int]]:
+    """Per-file error/warn counts, keyed by archive member name."""
+    return {name: severity_counts(scan_text(text)) for name, text in iter_archive_logs(archive_path)}
 
 
 def review_tgz_bundle(tgz_path: str | Path) -> dict[str, Any]:
     archive_path = Path(tgz_path)
-    extract_root = _extract_archive(archive_path)
+    totals: Counter[str] = Counter()
+    files: list[dict[str, Any]] = []
 
-    log_files = _collect_log_files(extract_root)
-    keyword_hits: dict[str, int] = {}
-    highlight_set: set[str] = set()
-    reviewed_count = 0
+    for name, text in iter_archive_logs(archive_path):
+        hits = scan_text(text)
+        totals.update(hits)
+        files.append({"path": name, **severity_counts(hits)})
 
-    for log_file in log_files:
-        text = _safe_read_text(log_file)
-        if not text:
-            continue
-
-        reviewed_count += 1
-        found = {match.upper() for match in KEYWORD_PATTERN.findall(text)}
-        for token in found:
-            keyword_hits[token] = keyword_hits.get(token, 0) + text.upper().count(token)
-            highlight_set.add(token)
-
-    report = {
+    reviewed = [entry for entry in files if entry["error"] or entry["warn"]]
+    reviewed.sort(key=lambda entry: (entry["error"], entry["warn"]), reverse=True)
+    return {
         "archive": archive_path.name,
         "source_path": str(archive_path),
-        "log_files": reviewed_count,
-        "error_count": sum(keyword_hits.values()),
-        "keywords": sorted(keyword_hits),
-        "highlights": sorted(highlight_set),
-        "files_reviewed": [str(path.relative_to(extract_root)) for path in log_files],
+        "log_files": len(files),
+        "error_count": sum(totals.values()),
+        "keywords": dict(sorted(totals.items())),
+        "highlights": sorted(totals),
+        "top_files": reviewed[:10],
+        "files_reviewed": sorted(entry["path"] for entry in files),
     }
-    return report
 
 
 def review_directory(input_dir: str | Path) -> list[dict[str, Any]]:
-    target_dir = Path(input_dir)
-    archives = sorted(target_dir.glob("*.tgz"))
-    return [review_tgz_bundle(path) for path in archives]
+    return [review_tgz_bundle(path) for path in find_archives(input_dir)]
